@@ -28,6 +28,18 @@ The apps you hide are also remembered in `~/.local/state/plusmenu-settings/hidde
 
 `install.sh` sets up systemd user units that run it: `plusmenu-settings-sync.path` whenever an applications folder changes, and `plusmenu-settings-sync.timer` a minute after login and every hour (Flatpak updates only change where its links point, which the folder watch doesn't see). Its log: `journalctl --user -u plusmenu-settings-sync`.
 
+## Install
+
+In a terminal on the Steam Frame (Desktop Mode or Frametop):
+
+```
+curl -fsSL https://raw.githubusercontent.com/superpaiku/plusmenu-settings/main/get.sh | bash
+```
+
+That downloads the latest release to `~/.local/share/plusmenu-settings`, checks its SHA-256, and installs the `plusmenu-settings` command, the "Plusmenu-Settings" menu entry and the background service. Run it again to update. To uninstall, add `-s -- --remove` after `bash`.
+
+Or download `plusmenu-settings.tar.gz` from the [latest release](https://github.com/superpaiku/plusmenu-settings/releases/latest), unpack it, and run `./install.sh` in the `plusmenu-settings` folder. Keep the folder: the command runs from there.
+
 ## Usage
 
 ```
