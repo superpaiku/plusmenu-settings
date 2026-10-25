@@ -2,6 +2,8 @@
 
 Hides apps from the Steam Frame dashboard's + menu without uninstalling them. Desktop Mode and the Frametop desktop still list them.
 
+![Plusmenu-Settings: a switch per app, with Dolphin, Firewall and LibreOffice Impress hidden](docs/screenshot.png)
+
 ## How it works
 
 The + menu's "Launch Program" section comes from `SteamClient.Apps.ScanForInstalledNonSteamApps()`, the same scan "Add a Non-Steam Game" uses. Steam runs it with `XDG_CURRENT_DESKTOP=gamescope` over the `.desktop` files in `~/.local/share/applications`, the Flatpak exports, `/usr/local/share` and `/usr/share`, the first file of a name winning.
