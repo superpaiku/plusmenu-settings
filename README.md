@@ -14,9 +14,19 @@ When it can, the app reads the developer mode setting through Steam's local CEF 
 Hiding an app adds `NotShowIn=gamescope;` without touching system files:
 
 - **File already in `~/.local/share/applications`**: the key goes in that file, with the mark `X-PlusmenuSettings-Added=true`. Showing the app again takes both out.
-- **Any other app**: a copy goes there with `NotShowIn=gamescope;` and `X-PlusmenuSettings-Copy=true`. Showing the app again deletes it. When there's a Frametop copy (`~/.local/share/frametop/apps`), the new copy is made from that one, so the app keeps "Launch as Standalone" in the Frametop desktop.
+- **Any other app**: a copy goes there with `NotShowIn=gamescope;` and `X-PlusmenuSettings-Copy=true`. Showing the app again deletes it. With Frametop installed, the copy is built with Frametop's own `ft_apps.standalone()`, so the app keeps "Launch as Standalone" in the Frametop desktop.
 
 Reopen the + menu to see changes.
+
+## Background service
+
+The apps you hide are also remembered in `~/.local/state/plusmenu-settings/hidden.json`. `plusmenu-settings sync` brings their entries up to date:
+
+- an entry that an install or update rewrote (e.g. reinstalling Frametop) is hidden again;
+- a copy whose app's desktop file changed (e.g. a Flatpak or SteamOS update) is rebuilt from the new file;
+- a copy whose app was uninstalled is deleted, so no dead entry stays in the KDE menus. If the app comes back, it's hidden again.
+
+`install.sh` sets up systemd user units that run it: `plusmenu-settings-sync.path` whenever an applications folder changes, and `plusmenu-settings-sync.timer` a minute after login and every hour (Flatpak updates only change where its links point, which the folder watch doesn't see). Its log: `journalctl --user -u plusmenu-settings-sync`.
 
 ## Usage
 
@@ -35,8 +45,8 @@ SteamOS on the Steam Frame, with Python 3, GTK 4 and libadwaita (all preinstalle
 
 ## Known limits
 
-- A hidden app's copy keeps the desktop file as it was when it was hidden (name, icon, Exec). After an update, show and hide it once.
-- Reinstalling Frametop or another app that writes its own entry to `~/.local/share/applications` replaces that entry, so it shows up in the + menu again until you hide it again.
+- After an install or update, an app can show up in the + menu for a few seconds (up to an hour for a Flatpak update) until the service hides it again.
+- The Frametop session points `XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR` to its own folders; `install.sh` uses the standard locations and the login's systemd, so run it from any terminal.
 - The menu's rules come from Steam's current client code and may change with a Steam update.
 
 ## License

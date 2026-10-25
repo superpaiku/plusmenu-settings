@@ -15,15 +15,22 @@ Hiding an app writes that key without touching system files:
   - an app whose file is in ~/.local/share/applications gets it added in place, marked
     X-PlusmenuSettings-Added so showing it again takes it out;
   - any other app gets a copy there, marked X-PlusmenuSettings-Copy, which showing it again deletes.
-    The copy is made from Frametop's copy when there is one, so the app keeps Launch as
-    Standalone in the Frametop desktop (a file in XDG_DATA_HOME wins over Frametop's).
+    With Frametop installed, the copy is made with its ft_apps.standalone(), so the app keeps
+    Launch as Standalone in the Frametop desktop (a file in XDG_DATA_HOME wins over Frametop's
+    copy, which Frametop then removes).
+
+The apps hidden here are also kept in STATE, so `sync` (run by the systemd units install.sh
+adds, whenever an applications folder changes and every hour) can hide an app again whose
+entry an install rewrote, redo a copy whose app was updated, and delete one whose app is gone.
 
   plusmenu-settings                  open the window
   plusmenu-settings list [--hidden]  list the apps (hidden: only the ones hidden here)
   plusmenu-settings hide ID...       hide apps from the dashboard (ID: the desktop file name)
   plusmenu-settings show ID...       show them again
+  plusmenu-settings sync             bring the entries of the apps hidden here up to date
 """
 import base64
+import importlib.util
 import json
 import os
 import re
@@ -46,6 +53,9 @@ MARK_COPY = "X-PlusmenuSettings-Copy"
 MARK_ADDED = "X-PlusmenuSettings-Added"
 MARK_SOURCE = "X-PlusmenuSettings-Source"
 FRAMETOP_APPS = os.path.expanduser("~/.local/share/frametop/apps")
+FT_APPS_PY = os.path.expanduser("~/frametop/float/ft_apps.py")
+# Not XDG_STATE_HOME: the Frametop session points the XDG folders elsewhere, systemd doesn't
+STATE = os.environ.get("PLUSMENU_STATE") or os.path.expanduser("~/.local/state/plusmenu-settings/hidden.json")
 DEFAULT_DATA_DIRS = ["~/.local/share/flatpak/exports/share", "/var/lib/flatpak/exports/share",
                      "/usr/local/share", "/usr/share"]
 # The dashboard's filters on the scan, by executable name (steamui sp.js)
@@ -296,15 +306,20 @@ def scan(refresh=False):
     """Every app in Steam's search path, as the + menu would see it, sorted by name."""
     dev = developer_mode(refresh)
     home_apps, roots = search_path()
+    apps = [_describe(i, p, root == home_apps, dev) for i, (p, root) in _desktop_files(roots).items()]
+    return sorted((a for a in apps if a), key=lambda a: (a.name.casefold(), a.id))
+
+
+def _desktop_files(roots):
+    """Desktop file ID -> (its path, its applications folder), the first one found winning."""
     found = {}
     for root in roots:
         for dirpath, _dirs, files in os.walk(root, followlinks=True):
             for name in files:
                 if name.endswith(".desktop"):
                     path = os.path.join(dirpath, name)
-                    found.setdefault(os.path.relpath(path, root).replace("/", "-"), (path, root == home_apps))
-    apps = [_describe(i, p, h, dev) for i, (p, h) in found.items()]
-    return sorted((a for a in apps if a), key=lambda a: (a.name.casefold(), a.id))
+                    found.setdefault(os.path.relpath(path, root).replace("/", "-"), (path, root))
+    return found
 
 
 def find(app_id):
@@ -321,28 +336,84 @@ def _refresh(home_apps):
         pass
 
 
-def hide(app):
-    if app.id == SELF_ID:
-        raise ValueError(f"{app.id}: Plusmenu-Settings can't hide itself")
-    if app.state == "hidden":
-        return
-    home_apps, _ = search_path()
+def hidden_ids():
+    """The IDs of the apps hidden here. Without STATE yet (hidden by an older version), the ones
+    whose entry has our marks."""
+    try:
+        with open(STATE) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, ValueError, TypeError):
+        ids = {a.id for a in scan() if a.state == "hidden" and a.ours}
+        _save_hidden(ids)
+        return ids
+
+
+def _save_hidden(ids):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    _write(STATE, json.dumps(sorted(ids), indent=1) + "\n")
+
+
+_ft_apps = []
+
+
+def _frametop():
+    """Frametop's ft_apps module, or None without Frametop."""
+    if not _ft_apps:
+        module = None
+        if os.path.isfile(FT_APPS_PY):
+            try:
+                spec = importlib.util.spec_from_file_location("ft_apps", FT_APPS_PY)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if not callable(getattr(module, "standalone", None)):
+                    module = None
+            except Exception:  # someone else's code: any failure only means no Launch as Standalone
+                module = None
+        _ft_apps.append(module)
+    return _ft_apps[0]
+
+
+def _copy_text(app_id, source):
+    """What our copy of the app with that desktop file holds."""
+    text = None
+    if _frametop():
+        try:
+            text = _frametop().standalone(source, app_id)
+        except Exception:
+            text = None
+    if text is None:
+        text = _read(source)
+    return set_key(set_key(with_desktop(text, True), MARK_COPY, "true"), MARK_SOURCE, source)
+
+
+def _hide_entry(app):
     if app.in_home:
         text = with_desktop(_read(app.path), True)
         if get_key(text, MARK_COPY) != "true":
             text = set_key(text, MARK_ADDED, "true")
         _write(app.path, text)
     else:
-        frametop_copy = os.path.join(FRAMETOP_APPS, "applications", app.id)
-        base = frametop_copy if os.path.isfile(frametop_copy) else app.path
-        text = with_desktop(_read(base), True)
-        text = set_key(set_key(text, MARK_COPY, "true"), MARK_SOURCE, app.path)
+        home_apps, _ = search_path()
         os.makedirs(home_apps, exist_ok=True)
-        _write(os.path.join(home_apps, app.id), text)
-    _refresh(home_apps)
+        _write(os.path.join(home_apps, app.id), _copy_text(app.id, app.path))
+
+
+def hide(app):
+    if app.id == SELF_ID:
+        raise ValueError(f"{app.id}: Plusmenu-Settings can't hide itself")
+    ids = hidden_ids()  # first, so a sync running meanwhile hides it too rather than not at all
+    if app.id not in ids:
+        _save_hidden(ids | {app.id})
+    if app.state == "hidden":
+        return
+    _hide_entry(app)
+    _refresh(search_path()[0])
 
 
 def show(app):
+    ids = hidden_ids()
+    if app.id in ids:
+        _save_hidden(ids - {app.id})
     if app.state != "hidden":
         return
     home_apps, _ = search_path()
@@ -352,6 +423,42 @@ def show(app):
     else:
         _write(app.path, set_key(with_desktop(text, False), MARK_ADDED, None))
     _refresh(home_apps)
+
+
+def sync():
+    """Bring the entries of the apps hidden here up to date: hide again one whose entry an
+    install rewrote, redo a copy whose app's file changed, delete one whose app is gone (it's
+    hidden again if the app comes back). Returns what it did, a line each."""
+    ids = hidden_ids()
+    if not ids:
+        return []
+    home_apps, roots = search_path()
+    apps = {a.id: a for a in scan()}
+    sources = _desktop_files(roots[1:])
+    done = []
+    for app_id in sorted(ids):
+        app = apps.get(app_id)
+        if app is None or app_id == SELF_ID:
+            continue
+        try:
+            text = _read(app.path) if app.in_home else None
+            if text is not None and get_key(text, MARK_COPY) == "true":
+                if app_id not in sources:
+                    os.remove(app.path)
+                    done.append(f"{app_id}: app removed, copy deleted")
+                    continue
+                want = _copy_text(app_id, sources[app_id][0])
+                if text != want:
+                    _write(app.path, want)
+                    done.append(f"{app_id}: copy updated")
+            elif app.state == "shown":
+                _hide_entry(app)
+                done.append(f"{app_id}: hidden again")
+        except (OSError, ValueError) as e:
+            done.append(f"{app_id}: {e}")
+    if done:
+        _refresh(home_apps)
+    return done
 
 
 # Command line
@@ -380,6 +487,10 @@ def cli(args):
                 print(e, file=sys.stderr)
                 status = 1
         return status
+    if cmd == "sync" and len(args) == 1:
+        for line in sync():
+            print(line)
+        return 0
     print(__doc__, file=sys.stderr)
     return 2
 
