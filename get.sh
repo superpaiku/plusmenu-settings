@@ -16,8 +16,7 @@ main() {  # all in a function, so a download cut short runs nothing
     return
   fi
 
-  local tmp
-  tmp=$(mktemp -d)
+  tmp=$(mktemp -d)  # global: the EXIT trap runs after main has returned
   trap 'rm -rf "$tmp"' EXIT
   echo "Downloading Plusmenu-Settings..."
   curl -fsSL "$url/plusmenu-settings.tar.gz" -o "$tmp/plusmenu-settings.tar.gz"
