@@ -36,6 +36,8 @@ Exec=$bin
 Icon=view-list-symbolic
 Categories=Settings;Utility;
 Terminal=false
+# The window's Wayland app ID (set in plusmenu_settings.qml), so the taskbar shows this entry's icon
+StartupWMClass=io.github.plusmenusettings.qml
 EOF
 update-desktop-database -q ~/.local/share/applications 2>/dev/null || true
 

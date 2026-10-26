@@ -45,7 +45,7 @@ from dataclasses import dataclass
 import gi
 
 gi.require_version("Gio", "2.0")
-from gi.repository import Gio, GLib
+from gi.repository import Gio
 
 DESKTOP = "gamescope"
 GROUP = "[Desktop Entry]"
@@ -495,162 +495,101 @@ def cli(args):
     return 2
 
 
-# Window
+# Window: plusmenu_settings.qml, a Kirigami UI run by Qt's qml runtime (SteamOS has no Python
+# bindings for Qt), which does everything through a local JSON API served here.
+
+QML = os.path.join(os.path.dirname(os.path.realpath(__file__)), "plusmenu_settings.qml")
+
+
+def _icon_source(icon):
+    """A Gio.Icon as a Kirigami.Icon source: an icon name or a file URL."""
+    if isinstance(icon, Gio.ThemedIcon):
+        return next(iter(icon.get_names()), "")
+    if isinstance(icon, Gio.FileIcon):
+        return icon.get_file().get_uri()
+    return ""
+
+
+def _app_json(app):
+    if app.id == SELF_ID and app.shown:
+        subtitle = f"{app.id} · this app can't hide itself"
+    elif app.state == "system":
+        subtitle = f"{app.id} · {app.reason}"
+    else:
+        subtitle = app.id + (" · " + app.comment if app.comment else "")
+    return {"appId": app.id, "name": app.name, "subtitle": subtitle, "iconSource": _icon_source(app.icon),
+            "status": app.state, "locked": app.state == "system" or (app.id == SELF_ID and app.shown)}
+
+
+def api(request):
+    """The window's request ({"action": load, hide, show or show-all, ...}) done: a message to show,
+    if any, and the apps as they now are."""
+    action, message = request.get("action"), None
+    if action in ("hide", "show"):
+        try:
+            app = find(request.get("appId"))
+            (hide if action == "hide" else show)(app)
+            message = f"{app.name} {'hidden' if action == 'hide' else 'is shown again'}"
+        except (LookupError, OSError, ValueError) as e:
+            message = str(e)
+    elif action == "show-all":
+        n, errors = 0, []
+        for app in scan():
+            if app.state == "hidden":
+                try:
+                    show(app)
+                    n += 1
+                except (OSError, ValueError) as e:
+                    errors.append(f"{app.name}: {e}")
+        message = "\n".join(errors + [f"{n} apps shown again"])
+    elif action != "load":
+        raise ValueError(f"unknown action {action!r}")
+    apps = scan(refresh=bool(request.get("refresh")))
+    return {"message": message, "dev": developer_mode(), "apps": [_app_json(a) for a in apps]}
+
 
 def gui():
-    gi.require_version("Gtk", "4.0")
-    gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gtk
+    import http.server
+    import secrets
+    import shutil
+    import threading
 
-    class Window(Adw.ApplicationWindow):
-        def __init__(self, application):
-            super().__init__(application=application, title="Plusmenu-Settings", default_width=720, default_height=820)
-            self.filter = "all"
-            self.show_system = False
+    token = secrets.token_urlsafe(24)
 
-            self.search = Gtk.SearchEntry(placeholder_text="Search apps", hexpand=True)
-            self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
-
-            reload_button = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Rescan")
-            reload_button.connect("clicked", lambda *_: self.load(refresh=True))
-            menu = Gio.Menu()
-            menu.append("Show all hidden apps again", "win.show-all")
-            menu.append("List entries the menu never shows", "win.show-system")
-            menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
-
-            show_all = Gio.SimpleAction.new("show-all", None)
-            show_all.connect("activate", lambda *_: self.show_all())
-            self.add_action(show_all)
-            show_system = Gio.SimpleAction.new_stateful("show-system", None, GLib.Variant.new_boolean(False))
-            show_system.connect("change-state", self.on_show_system)
-            self.add_action(show_system)
-
-            header = Adw.HeaderBar()
-            header.pack_start(reload_button)
-            header.pack_end(menu_button)
-
-            filters = Gtk.Box(css_classes=["linked"], halign=Gtk.Align.CENTER, margin_top=6, margin_bottom=6)
-            first = None
-            for key, label in (("all", "All"), ("shown", "Shown"), ("hidden", "Hidden")):
-                b = Gtk.ToggleButton(label=label, group=first, active=key == "all")
-                b.connect("toggled", self.on_filter, key)
-                first = first or b
-                filters.append(b)
-
-            self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"],
-                                       margin_start=12, margin_end=12, margin_bottom=12, valign=Gtk.Align.START)
-            self.listbox.set_filter_func(self.visible_row)
-            self.listbox.set_placeholder(Gtk.Label(label="No apps", margin_top=24, margin_bottom=24,
-                                                   css_classes=["dim-label"]))
-            clamp = Adw.Clamp(maximum_size=900, child=self.listbox)
-            scroller = Gtk.ScrolledWindow(vexpand=True, child=clamp)
-
-            search_box = Gtk.Box(margin_start=12, margin_end=12, margin_top=12)
-            search_box.append(self.search)
-            hint = Gtk.Label(wrap=True, css_classes=["dim-label", "caption"], margin_start=12, margin_end=12,
-                             label="The switch sets whether the app is listed under \u201cLaunch Program\u201d in the "
-                                   "Steam Frame dashboard's + menu. Desktop Mode and Frametop still list it. Reopen "
-                                   "the + menu to see changes.")
-            self.dev_label = Gtk.Label(css_classes=["dim-label", "caption"], margin_start=12, margin_end=12)
-
-            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            for w in (search_box, hint, self.dev_label, filters, scroller):
-                content.append(w)
-            self.toasts = Adw.ToastOverlay(child=content)
-            view = Adw.ToolbarView(content=self.toasts)
-            view.add_top_bar(header)
-            self.set_content(view)
-            self.load()
-
-        def load(self, refresh=False):
-            self.listbox.remove_all()
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            # The token keeps other local programs and web pages out
+            if not secrets.compare_digest(self.headers.get("X-Plusmenu-Token", ""), token):
+                return self.send_error(403)
             try:
-                apps = scan(refresh)
-            except OSError as e:
-                self.toast(f"Scan failed: {e}")
-                return
-            dev = developer_mode()
-            self.dev_label.set_label("Steam developer mode: " + {True: "on", False: "off"}.get(
-                dev, "unknown (Steam not reachable); VLC, Konsole and others are only listed when it's on"))
-            hidden = 0
-            for app in apps:
-                self.listbox.append(self.row(app))
-                hidden += app.state == "hidden"
-            self.set_title(f"Plusmenu-Settings ({hidden} hidden)" if hidden else "Plusmenu-Settings")
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                status, reply = 200, api(request)
+            except Exception as e:  # shown in the window rather than lost
+                status, reply = 500, {"message": f"Error: {e}"}
+            body = json.dumps(reply).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-        def row(self, app):
-            locked = app.state == "system" or (app.id == SELF_ID and app.shown)  # can't hide itself
-            row = Adw.ActionRow(title=GLib.markup_escape_text(app.name), activatable=not locked)
-            if app.id == SELF_ID and app.shown:
-                subtitle = f"{app.id} · this app can't hide itself"
-            elif app.state == "system":
-                subtitle = f"{app.id} · {app.reason}"
-            else:
-                subtitle = app.id + (" · " + app.comment if app.comment else "")
-            row.set_subtitle(GLib.markup_escape_text(subtitle))
-            row.set_subtitle_lines(1)
-            image = Gtk.Image(pixel_size=40)
-            if app.icon:
-                image.set_from_gicon(app.icon)
-            else:
-                image.set_from_icon_name("application-x-executable")
-            row.add_prefix(image)
-            switch = Gtk.Switch(active=app.shown, valign=Gtk.Align.CENTER, sensitive=not locked)
-            switch.connect("state-set", self.on_switch, app)
-            row.add_suffix(switch)
-            row.set_activatable_widget(switch)
-            row.app = app
-            return row
+        def log_message(self, *args):
+            pass
 
-        def visible_row(self, row):
-            app = row.app
-            if app.state == "system" and not self.show_system:
-                return False
-            if self.filter == "shown" and app.state != "shown":
-                return False
-            if self.filter == "hidden" and app.state != "hidden":
-                return False
-            q = self.search.get_text().casefold().strip()
-            return not q or q in app.name.casefold() or q in app.id.casefold()
-
-        def on_filter(self, button, key):
-            if button.get_active():
-                self.filter = key
-                self.listbox.invalidate_filter()
-
-        def on_show_system(self, action, value):
-            action.set_state(value)
-            self.show_system = value.get_boolean()
-            self.listbox.invalidate_filter()
-
-        def on_switch(self, switch, active, app):
-            try:
-                (show if active else hide)(app)
-            except (OSError, ValueError) as e:
-                self.toast(f"{app.name}: {e}")
-                return True  # keep the switch where it was
-            self.toast(f"{app.name} {'is shown again' if active else 'hidden'}")
-            GLib.idle_add(lambda: self.load() and False)
-            return False
-
-        def show_all(self):
-            n = 0
-            for app in scan():
-                if app.state == "hidden":
-                    try:
-                        show(app)
-                        n += 1
-                    except (OSError, ValueError) as e:
-                        self.toast(f"{app.name}: {e}")
-            self.toast(f"{n} apps shown again")
-            self.load()
-
-        def toast(self, text):
-            self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(text), timeout=3))
-
-    app = Adw.Application(application_id="io.github.plusmenusettings.PlusmenuSettings")
-    app.connect("activate", lambda a: (a.get_active_window() or Window(a)).present())
-    return app.run([sys.argv[0]])
+    # One request at a time, so a hide and a show never run together
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    qml = shutil.which("qml6") or "/usr/lib/qt6/bin/qml"
+    env = dict(os.environ)
+    env.setdefault("QT_QUICK_CONTROLS_STYLE", "org.kde.desktop")  # Breeze outside Plasma too
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        return subprocess.run([qml, "-a", "widget", QML, "--", url, token], env=env).returncode
+    except OSError as e:
+        print(f"Can't start {qml}: {e}", file=sys.stderr)
+        return 1
+    finally:
+        server.shutdown()
 
 
 if __name__ == "__main__":

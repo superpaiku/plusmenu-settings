@@ -2,7 +2,7 @@
 
 Hides apps from the Steam Frame dashboard's + menu without uninstalling them. Desktop Mode and the Frametop desktop still list them.
 
-![Plusmenu-Settings: a switch per app, with Dolphin, Firewall and LibreOffice Impress hidden](docs/screenshot.png)
+![Plusmenu-Settings: a switch per app, with Dolphin and Firewall hidden](docs/screenshot.png)
 
 ## How it works
 
@@ -55,7 +55,7 @@ plusmenu-settings show vlc.desktop
 
 ## Requirements
 
-SteamOS on the Steam Frame, with Python 3, GTK 4 and libadwaita (all preinstalled). No root access needed: everything lives in your home folder.
+SteamOS on the Steam Frame, with Python 3, Qt 6's `qml6` runtime and KDE's Kirigami (all preinstalled). The window is a Kirigami UI (`plusmenu_settings.qml`) run by `qml6`; it talks to `plusmenu_settings.py` through a local API on 127.0.0.1 that only it has the key to. No root access needed: everything lives in your home folder.
 
 ## Known limits
 
